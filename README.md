@@ -63,7 +63,33 @@ src/
   server.js        entry point: listen + graceful shutdown
 ```
 
-## Setup
+## Try it end-to-end (no real target needed)
+
+`mock/server.js` stands in for both the upstream target and the
+third-party widget, so you can exercise the whole flow — warmup, cookie
+reuse, token capture, ownership check — without pointing at anything real.
+
+```bash
+npm install
+
+# terminal 1
+npm run mock
+
+# terminal 2
+cp .env.mock.example .env
+npm start
+
+# terminal 3
+npm run demo
+```
+
+`scripts/demo.sh` walks through: `/target-warmup` → `/target-api/echo`
+(reusing the upstream cookie the warmup call obtained) → `/verify-api/session/start`
+(captures a token from the mock widget) → `/verify-tokens/me` (reads the
+token back, then confirms the same call without the session cookie is
+rejected).
+
+## Setup against a real target
 
 ```bash
 cp .env.example .env   # point at your own upstream/third-party test targets

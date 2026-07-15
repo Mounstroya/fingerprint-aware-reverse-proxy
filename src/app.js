@@ -154,7 +154,13 @@ function createApp() {
   // watch for the call that issues its session token, and store that token
   // tied to *our* session id so only the owning browser session can read it
   // back (see /verify-tokens/me below).
-  app.use(
+  // NOTE: app.all(), not app.use() — Express strips the matched prefix
+  // from req.path/req.url for wildcard .use() mounts (verified: a
+  // `.use('/x/*', ...)` handler sees req.path === '/' regardless of what
+  // came after /x/), which would make every relayed request collapse to
+  // the third-party API's root path. .all() registers a single Route
+  // instead of separate router layers, so req.path stays intact.
+  app.all(
     '/verify-api/*',
     express.raw({ type: '*/*', limit: '20mb' }),
     requireSession,
