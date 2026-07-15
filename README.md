@@ -1,46 +1,80 @@
 # fingerprint-aware-reverse-proxy
 
-A curl-based Node.js/Express reverse proxy built to solve a real-world
-problem: fronting a browser-based flow against an upstream API protected by
-WAF/TLS fingerprinting, while transparently relaying an embedded third-party
-widget (identity verification, payments, etc.) and its own authentication
-handshake.
+[![CI](https://github.com/Mounstroya/fingerprint-aware-reverse-proxy/actions/workflows/ci.yml/badge.svg)](https://github.com/Mounstroya/fingerprint-aware-reverse-proxy/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Node](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](package.json)
 
-This is a **generalized, sanitized version** of a proxy originally built for
-an authorized security/integration engagement. All hostnames, brand names,
-and vendor-specific API paths have been replaced with placeholders and moved
-to configuration — this repo demonstrates the architecture and technique,
-not a working exploit against any real service.
+A curl-based Node.js/Express reverse proxy for fronting a browser flow
+against an upstream API protected by WAF/TLS fingerprinting, while
+transparently relaying an embedded third-party widget (identity
+verification, payments, etc.) and capturing the session token it issues.
 
-## What it demonstrates
+Generalized and sanitized from a proxy originally built for an authorized
+security/integration engagement for a telecom client — all hostnames,
+brand names, and vendor-specific API paths were replaced with placeholders
+and moved to configuration. This repo demonstrates the architecture and
+technique, not a working exploit against any real service.
 
-- **WAF/TLS-fingerprint-aware proxying** — outbound requests are made with
-  `curl` instead of a Node HTTP client (`fetch`/`axios`), because some
-  upstream WAFs fingerprint clients by TLS handshake shape and header
-  order/casing, which Node's HTTP stack doesn't reproduce the way a real
-  browser or `curl` does.
-- **Per-session cookie jar management** — each browser session gets its own
-  on-disk cookie jar (in a dedicated `0700` directory, not the shared OS
-  tmpdir), with writes to the same jar serialized so concurrent requests
-  from one session can't race and clobber each other's cookies.
-- **Server-issued session identifiers** — the proxy is the only party that
-  can mint a valid session id; a client-supplied id that the server never
-  issued is rejected rather than silently accepted (avoids session
-  fixation).
-- **Third-party widget relay + token capture** — a generic pattern for
-  transparently proxying an embedded third-party widget's traffic while
-  watching for the call that issues its session token, storing that token
-  tied to the owning proxy session so only that session can read it back.
-- **Binary-safe, delimiter-free response handling** — curl writes each
-  response body to a temp file (`-o`) and status/content-type come back on
-  a separate stream (`-w`), so binary assets never get mangled by string
-  decoding and a body that happens to contain delimiter-like bytes can't
-  corrupt parsing.
-- **Bounded concurrency** — every curl invocation is a real OS process;
-  calls are capped through a shared limiter so a traffic burst can't
-  exhaust the process/file-descriptor table.
-- **Origin allowlisting** — CORS is opt-in per origin via config, not a
-  reflected wildcard with credentials enabled.
+## Highlights
+
+- **Evades naive WAF/TLS fingerprinting** by shelling out to `curl`
+  instead of using Node's HTTP client, so outbound requests reproduce a
+  real browser's TLS handshake and header shape.
+- **Session-safe under concurrency** — per-session cookie jars live in a
+  dedicated `0700` directory and writes to the same jar are serialized,
+  closing a real race condition where two concurrent requests from one
+  session could clobber each other's cookies.
+- **Closes session fixation** — only sids the server itself issued are
+  accepted; a client can't plant its own.
+- **Binary-safe proxying** — response bodies are written to a temp file
+  via curl's `-o`, with status/content-type read back on a separate
+  stream, so binary assets can't be corrupted by string decoding and a
+  body that happens to contain a delimiter-like byte sequence can't
+  desync parsing.
+- **Bounded process concurrency** — every curl call is a real OS process;
+  a shared limiter caps how many run at once so a traffic burst can't
+  exhaust file descriptors.
+- **Runnable in under a minute** — a bundled mock server stands in for
+  both the upstream and the third-party widget, so the whole flow is
+  provable with zero real credentials (see below).
+
+## Try it in under a minute
+
+`mock/server.js` plays both the upstream target and the third-party
+widget, so you can run the full flow with nothing real behind it.
+
+```bash
+npm install
+
+# terminal 1
+npm run mock
+
+# terminal 2
+cp .env.mock.example .env
+npm start
+
+# terminal 3
+npm run demo
+```
+
+`npm run demo` drives all five steps end-to-end and prints each response:
+
+```
+1) /target-warmup — issues a proxy session and primes the upstream cookie jar
+{"ok":true}
+
+2) POST /target-api/echo — reuses the jar's upstream cookie through the proxy
+{"ok":true,"youSent":{"hello":"world"}}
+
+3) POST /verify-api/session/start — relays to the third-party widget and captures its token
+{"token":"mock-token-...","sessionId":"..."}
+
+4) GET /verify-tokens/me — reads back the captured token (only valid for this session's cookie)
+{"ok":true,"token":"mock-token-...","sessionId":"...","ts":...}
+
+5) sanity check — the same call WITHOUT the session cookie must be rejected
+status: 401
+```
 
 ## Architecture
 
@@ -61,33 +95,20 @@ src/
   sessionStore.js  session registry, cookie jar lifecycle, captured tokens
   app.js           Express app / routes (factory, for testability)
   server.js        entry point: listen + graceful shutdown
+mock/server.js      stand-in upstream + third-party widget for local testing
+scripts/demo.sh      curl walkthrough of the full flow
 ```
 
-## Try it end-to-end (no real target needed)
+## Endpoints
 
-`mock/server.js` stands in for both the upstream target and the
-third-party widget, so you can exercise the whole flow — warmup, cookie
-reuse, token capture, ownership check — without pointing at anything real.
-
-```bash
-npm install
-
-# terminal 1
-npm run mock
-
-# terminal 2
-cp .env.mock.example .env
-npm start
-
-# terminal 3
-npm run demo
-```
-
-`scripts/demo.sh` walks through: `/target-warmup` → `/target-api/echo`
-(reusing the upstream cookie the warmup call obtained) → `/verify-api/session/start`
-(captures a token from the mock widget) → `/verify-tokens/me` (reads the
-token back, then confirms the same call without the session cookie is
-rejected).
+| Route | Method | Purpose |
+|---|---|---|
+| `/health` | GET | liveness check |
+| `/target-warmup` | GET | issues a proxy session, primes the upstream cookie jar |
+| `/target-api/*` | POST | proxies to `TARGET_API_BASE`, reusing the session's cookie jar |
+| `/assets/*` | GET | static asset relay for an embedded third-party widget |
+| `/verify-api/*` | ALL | transparent relay to `THIRD_PARTY_API_BASE`, captures the token issued at `TOKEN_ISSUING_PATH` |
+| `/verify-tokens/me` | GET | returns the captured token for the caller's own session only |
 
 ## Setup against a real target
 
