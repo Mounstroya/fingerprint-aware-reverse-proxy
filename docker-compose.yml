@@ -1,0 +1,16 @@
+services:
+  reverse-proxy-portfolio:
+    build: .
+    container_name: reverse-proxy-portfolio
+    ports:
+      - "3099:3099"
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 256M
